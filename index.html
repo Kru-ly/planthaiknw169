@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ระบบส่งแผนการสอนนักศึกษา | กลุ่มสาระการเรียนรู้ภาษาไทย โรงเรียนแก่นนครวิทยาลัย</title>
+<title>ระบบส่งแผนการสอน | กลุ่มสาระภาษาไทย โรงเรียนแก่นนครวิทยาลัย</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&family=Noto+Serif+Thai:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -613,7 +613,7 @@ body {
     <div class="logo-area">
       <div class="logo-circle">ภ</div>
       <div class="logo-text">
-        <h1>ระบบส่งแผนการสอนนักศึกษา · กลุ่มสาระการเรียนรู้ภาษาไทย</h1>
+        <h1>ระบบส่งแผนการสอน · กลุ่มสาระภาษาไทย</h1>
         <p>โรงเรียนแก่นนครวิทยาลัย · ภาคเรียนที่ 1 ปีการศึกษา 2569</p>
       </div>
     </div>
@@ -865,14 +865,125 @@ const CRITERIA = [
 let currentUser = null;
 let currentRole = null;
 let submissions = {};
-// Init submissions
-STUDENTS.forEach(s => {
-  submissions[s.id] = {};
-  DEADLINES.forEach(d => {
-    submissions[s.id][d.id] = { status:'pending', title:'', desc:'', file:'', submittedAt:'', scores:{}, feedback:'', evalResult:'', evalAt:'' };
+
+// ===== GOOGLE SHEET SYNC =====
+// วาง URL ของ Apps Script Web App ที่ Deploy แล้วที่นี่
+const APPS_SCRIPT_URL = 'https://script.google.com/a/macros/knw.ac.th/s/AKfycbwiRizuRiveY-WVI2O1xAlbS5cD2lrz62GHfyVjHP2qZ3O9Ya2nTU6nkMM8y77jQBrQ/exec';
+
+function initEmptySubmissions() {
+  STUDENTS.forEach(s => {
+    submissions[s.id] = {};
+    DEADLINES.forEach(d => {
+      submissions[s.id][d.id] = { status:'pending', title:'', desc:'', file:'', fileUrl:'', submittedAt:'', scores:{}, feedback:'', evalResult:'', evalAt:'' };
+    });
   });
-});
-// Demo data
+}
+
+// โหลดข้อมูลทั้งหมดจาก Google Sheet
+async function loadFromSheet() {
+  showSyncIndicator('กำลังโหลดข้อมูล...');
+  try {
+    const res = await fetch(APPS_SCRIPT_URL, { method:'GET', redirect:'follow' });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'โหลดล้มเหลว');
+
+    // เริ่มจาก default ก่อน แล้ว merge ข้อมูลจาก Sheet
+    initEmptySubmissions();
+    const data = json.data || {};
+    STUDENTS.forEach(s => {
+      DEADLINES.forEach(d => {
+        if (data[s.id] && data[s.id][d.id]) {
+          submissions[s.id][d.id] = { ...submissions[s.id][d.id], ...data[s.id][d.id] };
+        }
+      });
+    });
+    hideSyncIndicator();
+    return true;
+  } catch(err) {
+    console.error('loadFromSheet error:', err);
+    hideSyncIndicator('⚠ โหลดข้อมูลไม่สำเร็จ — ใช้ข้อมูลในเครื่อง');
+    // Fallback: โหลดจาก localStorage
+    try {
+      const saved = localStorage.getItem('knwthai_submissions');
+      if (saved) {
+        const data = JSON.parse(saved);
+        STUDENTS.forEach(s => {
+          DEADLINES.forEach(d => {
+            if (data[s.id] && data[s.id][d.id]) {
+              submissions[s.id][d.id] = { ...submissions[s.id][d.id], ...data[s.id][d.id] };
+            }
+          });
+        });
+      }
+    } catch(e) {}
+    return false;
+  }
+}
+
+// บันทึกแถวเดียวไปยัง Google Sheet (เร็วกว่า save ทั้งหมด)
+async function saveRowToSheet(studentId, roundId) {
+  const sub = submissions[studentId][roundId];
+  // Optimistic: save localStorage ด้วยเผื่อ offline
+  try { localStorage.setItem('knwthai_submissions', JSON.stringify(submissions)); } catch(e) {}
+
+  try {
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      body: JSON.stringify({ studentId, roundId, sub })
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'บันทึกล้มเหลว');
+  } catch(err) {
+    console.error('saveRowToSheet error:', err);
+    showToast('⚠ บันทึกไปยัง Cloud ไม่สำเร็จ — ข้อมูลยังอยู่ในเครื่อง');
+  }
+}
+
+// compat alias — ฟังก์ชันเดิมที่เรียก saveSubmissions() ใช้งานได้ต่อ
+function saveSubmissions() {
+  try { localStorage.setItem('knwthai_submissions', JSON.stringify(submissions)); } catch(e) {}
+}
+
+// ===== SYNC UI =====
+function showSyncIndicator(msg) {
+  let el = document.getElementById('sync-indicator');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sync-indicator';
+    el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;background:#1a3a5c;color:white;padding:10px 18px;border-radius:10px;font-size:13px;font-family:Sarabun,sans-serif;display:flex;align-items:center;gap:8px;box-shadow:0 4px 20px rgba(0,0,0,0.25);';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 0.8s linear infinite"></span> ${msg}`;
+  el.style.display = 'flex';
+}
+function hideSyncIndicator(errMsg) {
+  const el = document.getElementById('sync-indicator');
+  if (!el) return;
+  if (errMsg) {
+    el.innerHTML = errMsg;
+    el.style.background = '#8b1a1a';
+    setTimeout(() => { el.style.display = 'none'; }, 4000);
+  } else {
+    el.style.display = 'none';
+  }
+}
+function showToast(msg) {
+  let el = document.getElementById('sync-indicator');
+  if (!el) { el = document.createElement('div'); el.id='sync-indicator'; document.body.appendChild(el); }
+  el.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;background:#7a5500;color:white;padding:10px 18px;border-radius:10px;font-size:13px;font-family:Sarabun,sans-serif;box-shadow:0 4px 20px rgba(0,0,0,0.25);';
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+// CSS spin animation
+const _style = document.createElement('style');
+_style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
+document.head.appendChild(_style);
+
+// Init submissions ด้วย default ก่อน (ข้อมูลจริงโหลดหลัง login)
+initEmptySubmissions();
 
 
 let currentSubmitRound = 1;
@@ -930,7 +1041,7 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-function setupApp() {
+async function setupApp() {
   const initials = currentUser.name.replace('นาย','').replace('นางสาว','').replace('นาง','').trim().charAt(0);
   document.getElementById('header-avatar').textContent = initials;
   document.getElementById('header-name').textContent = currentUser.name + (currentRole==='admin'?' (แอดมิน)':currentRole==='teacher'?' (ครูพี่เลี้ยง)':'');
@@ -940,6 +1051,8 @@ function setupApp() {
   document.getElementById('tab-review').style.display = (currentRole==='teacher'||currentRole==='admin')?'':'none';
   document.getElementById('tab-manage').style.display = currentRole==='admin'?'':'none';
 
+  // โหลดข้อมูลจาก Google Sheet ก่อนแสดงหน้า
+  await loadFromSheet();
   switchPage('dashboard');
 }
 
@@ -1142,9 +1255,6 @@ function openSubmitModal(roundId) {
   document.getElementById('alert-submit-ok').style.display='none';
   document.getElementById('modal-submit').style.display='flex';
 }
-// ===== GOOGLE DRIVE UPLOAD CONFIG =====
-const APPS_SCRIPT_URL = 'https://script.google.com/a/macros/knw.ac.th/s/AKfycbwiRizuRiveY-WVI2O1xAlbS5cD2lrz62GHfyVjHP2qZ3O9Ya2nTU6nkMM8y77jQBrQ/exec';
-
 // Validate Drive link on input
 document.addEventListener('input', function(e) {
   if(e.target.id !== 'drive-link') return;
@@ -1187,6 +1297,9 @@ async function submitPlan() {
     sub.fileUrl = driveLink;
     sub.submittedAt = today();
 
+    // 💾 บันทึกไปยัง Google Sheet (และ localStorage เป็น fallback)
+    await saveRowToSheet(currentUser.id, currentSubmitRound);
+
     document.getElementById('alert-submit-ok').style.display = 'block';
     document.getElementById('alert-submit-ok').innerHTML = `✓ ส่งแผนการสอนเรียบร้อยแล้ว! พร้อมลิงก์ Google Drive`;
 
@@ -1201,11 +1314,12 @@ async function submitPlan() {
   }
 }
 
-function cancelSubmit(studentId, roundId) {
+async function cancelSubmit(studentId, roundId) {
   if(!confirm('ต้องการยกเลิกการส่งแผนการสอนครั้งนี้ใช่หรือไม่?\nข้อมูลที่ส่งจะถูกลบออกทั้งหมด')) return;
   const sub = submissions[studentId][roundId];
-  sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.submittedAt='';
+  sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.fileUrl=''; sub.submittedAt='';
   sub.scores={}; sub.feedback=''; sub.evalResult=''; sub.evalAt='';
+  await saveRowToSheet(studentId, roundId); // 💾 sync ไปยัง Sheet
   renderSubmit(); renderDashboard();
 }
 
@@ -1284,7 +1398,7 @@ function updateTotalScore() {
   const g = gradeFromScore(total);
   document.getElementById('grade-display').innerHTML = `<span style="background:${g.color};color:white;padding:4px 16px;border-radius:20px;font-size:13px;font-weight:600">${g.label}</span>`;
 }
-function saveEval() {
+async function saveEval() {
   const fb = document.getElementById('eval-feedback').value.trim();
   const result = document.getElementById('eval-result').value;
   const sub = submissions[currentEvalStudentId][currentEvalRound];
@@ -1293,6 +1407,7 @@ function saveEval() {
   sub.evalResult = result;
   sub.status = result;
   sub.evalAt = today();
+  await saveRowToSheet(currentEvalStudentId, currentEvalRound); // 💾 sync ไปยัง Sheet
   document.getElementById('alert-eval-ok').style.display='block';
   setTimeout(()=>{ closeModal('modal-eval'); renderReview(); renderDashboard(); }, 1500);
 }
@@ -1428,35 +1543,42 @@ function renderManage() {
     </div>`;
 }
 
-function adminDeleteSubmit(studentId, roundId) {
+async function adminDeleteSubmit(studentId, roundId) {
   const s = STUDENTS.find(x=>x.id===studentId);
   const d = DEADLINES.find(x=>x.id===roundId);
   if(!confirm(`ลบข้อมูลการส่งของ ${s.name} (${d.label}) ทั้งหมดใช่หรือไม่?\nรวมถึงผลการประเมินด้วย`)) return;
   const sub = submissions[studentId][roundId];
-  sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.submittedAt='';
+  sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.fileUrl=''; sub.submittedAt='';
   sub.scores={}; sub.feedback=''; sub.evalResult=''; sub.evalAt='';
+  await saveRowToSheet(studentId, roundId); // 💾 sync ไปยัง Sheet
   renderManage(); renderDashboard();
 }
 
-function adminDeleteEval(studentId, roundId) {
+async function adminDeleteEval(studentId, roundId) {
   const s = STUDENTS.find(x=>x.id===studentId);
   const d = DEADLINES.find(x=>x.id===roundId);
   if(!confirm(`ลบผลการประเมินของ ${s.name} (${d.label}) ใช่หรือไม่?\nการส่งจะยังคงอยู่ สถานะจะเปลี่ยนเป็น "รอตรวจ"`)) return;
   const sub = submissions[studentId][roundId];
   sub.scores={}; sub.feedback=''; sub.evalResult=''; sub.evalAt='';
   sub.status='submitted';
+  await saveRowToSheet(studentId, roundId); // 💾 sync ไปยัง Sheet
   renderManage(); renderDashboard();
 }
 
-function adminDeleteAll() {
+async function adminDeleteAll() {
   if(!confirm('⚠ ลบข้อมูลการส่งและผลการประเมินทั้งหมดในระบบ?\nการดำเนินการนี้ไม่สามารถย้อนกลับได้')) return;
+  showSyncIndicator('กำลังลบข้อมูลทั้งหมด...');
+  const promises = [];
   STUDENTS.forEach(s=>{
     DEADLINES.forEach(d=>{
       const sub = submissions[s.id][d.id];
-      sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.submittedAt='';
+      sub.status='pending'; sub.title=''; sub.desc=''; sub.file=''; sub.fileUrl=''; sub.submittedAt='';
       sub.scores={}; sub.feedback=''; sub.evalResult=''; sub.evalAt='';
+      promises.push(saveRowToSheet(s.id, d.id));
     });
   });
+  await Promise.all(promises);
+  hideSyncIndicator();
   renderManage(); renderDashboard();
 }
 
